@@ -3,7 +3,7 @@ Resources:
   - TargetService:
       Type: AWS::ECS::Service
       Properties:
-        TaskDefinition: <TASK_DEFINITION_PLACEHOLDER>
+        TaskDefinition: "REPLACED_BY_CODEPIPELINE"
         LoadBalancerInfo:
           ContainerName: "khan-microservice-api"
           ContainerPort: 5000
