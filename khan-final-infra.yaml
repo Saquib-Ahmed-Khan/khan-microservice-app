@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Fargate microservices with CI/CD, Blue/Green deployment, and Infrastructure as Code
+
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+Resources:
+
+  KhanVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: khan-vpc }]
+
+  KhanInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: khan-igw }]
+
+  KhanAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref KhanVPC
+      InternetGatewayId: !Ref KhanInternetGateway
+
+  KhanPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref KhanVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+
+  KhanPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref KhanVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+
+  KhanALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP to ALB
+      VpcId: !Ref KhanVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  KhanALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: khan-alb
+      Scheme: internet-facing
+      Subnets:
+        - !Ref KhanPublicSubnet1
+        - !Ref KhanPublicSubnet2
+      SecurityGroups:
+        - !Ref KhanALBSecurityGroup
+      Type: application
+
+  KhanTGBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: khan-blue-tg
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref KhanVPC
+      TargetType: ip
+      HealthCheckPath: /
+
+  KhanTGGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: khan-green-tg
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref KhanVPC
+      TargetType: ip
+      HealthCheckPath: /
+
+  KhanALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref KhanTGBlue
+      LoadBalancerArn: !Ref KhanALB
+      Port: 80
+      Protocol: HTTP
+
+  KhanECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: khan-ecs-cluster
+
+  KhanECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: khan-ecs-task-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  KhanTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: khan-task
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt KhanECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: khan-microservice-api
+          Image: 615299769479.dkr.ecr.us-east-1.amazonaws.com/khan-microservice-api:latest
+          PortMappings:
+            - ContainerPort: 5000
+
+  KhanECSService:
+    Type: AWS::ECS::Service
+    DependsOn: KhanALBListener
+    Properties:
+      ServiceName: khan-service
+      Cluster: !Ref KhanECSCluster
+      LaunchType: FARGATE
+      DeploymentController:
+        Type: CODE_DEPLOY
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref KhanPublicSubnet1
+            - !Ref KhanPublicSubnet2
+          SecurityGroups:
+            - !Ref KhanALBSecurityGroup
+      LoadBalancers:
+        - ContainerName: khan-microservice-api
+          ContainerPort: 5000
+          TargetGroupArn: !Ref KhanTGBlue
+      TaskDefinition: !Ref KhanTaskDefinition
+
+  KhanCodeDeployApp:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: khan-codedeploy-app
+      ComputePlatform: ECS
+
+  KhanCodeDeployGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    DependsOn: KhanALBListener
+    Properties:
+      ApplicationName: !Ref KhanCodeDeployApp
+      DeploymentGroupName: khan-deployment-group
+      ServiceRoleArn: arn:aws:iam::615299769479:role/AWSCodePipelineServiceRole
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      BlueGreenDeploymentConfiguration:
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 1
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+          WaitTimeInMinutes: 0
+      ECSService:
+        ClusterName: !Ref KhanECSCluster
+        ServiceName: !Ref KhanECSService
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - TargetGroups:
+              - Name: khan-blue-tg
+              - Name: khan-green-tg
+            ProdTrafficRoute:
+              ListenerArns:
+                - !Ref KhanALBListener
+
+Outputs:
+  VPC:
+    Value: !Ref KhanVPC
+  ALBDNS:
+    Value: !GetAtt KhanALB.DNSName
+  ECSCluster:
+    Value: !Ref KhanECSCluster
