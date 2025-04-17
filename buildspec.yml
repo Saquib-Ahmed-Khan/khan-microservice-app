@@ -10,11 +10,13 @@ phases:
       - echo Build started on `date`
       - docker build -t khan-microservice-api .
       - docker tag khan-microservice-api:latest 615299769479.dkr.ecr.us-east-1.amazonaws.com/khan-microservice-api:latest
+      - docker push 615299769479.dkr.ecr.us-east-1.amazonaws.com/khan-microservice-api:latest
   post_build:
     commands:
-      - echo Build completed on `date`
-      - docker push 615299769479.dkr.ecr.us-east-1.amazonaws.com/khan-microservice-api:latest
+      - echo Writing imagedefinitions.json file...
       - printf '[{"name":"khan-microservice-api","imageUri":"615299769479.dkr.ecr.us-east-1.amazonaws.com/khan-microservice-api:latest"}]' > imagedefinitions.json
 
 artifacts:
-  files: imagedefinitions.json
+  files:
+    - imagedefinitions.json
+    - appspec.yaml
